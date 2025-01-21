@@ -6,3 +6,4 @@ class Form(StatesGroup):
     age = State()
     activity = State()
     city = State()
+    food_weight = State()
