@@ -1,12 +1,11 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import aiohttp
 import matplotlib.pyplot as plt
-from config import OPENWEATHER_API_KEY, OPENFOODFACTS_API_URL
+from config import OPENWEATHER_API_KEY
 
 
 # Получение API-ключей
 open_weather_api = OPENWEATHER_API_KEY
-open_food_facts_api = OPENFOODFACTS_API_URL
 
 
 # Получение температуры в городе через OpenWeatherMap
