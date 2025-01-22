@@ -8,8 +8,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 # Получение API-ключа OpenWeatherMap
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-# Сайт с калорийностью продуктов
-OPENFOODFACTS_API_URL = "https://world.openfoodfacts.org/api/v0/product/"
+# Получение API-ключа FoodData Central API
+FOOD_DATA_CENTRAL_API_KEY = os.getenv("FOOD_DATA_CENTRAL_API_KEY")
 
 # Получение API-ключа и ID Nutritionix
 NUTRITIONIX_API_KEY = os.getenv("NUTRITIONIX_API_KEY")
