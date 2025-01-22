@@ -1,14 +1,20 @@
 from aiogram import Router
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 import aiohttp
 from aiogram.filters.state import StateFilter
+from googletrans import Translator
+import requests
+import os
 from states import Form
 from config import OPENWEATHER_API_KEY, OPENFOODFACTS_API_URL, NUTRITIONIX_API_KEY, NUTRITIONIX_APP_ID
-
+from functions import get_temperature, calculate_water_goal, calculate_calorie_goal, create_chart_selection_keyboard
+from functions import generate_progress_charts
 
 router = Router()
+
+translator = Translator()
 
 # Временное хранилище данных
 users = {}
@@ -18,38 +24,6 @@ open_weather_api = OPENWEATHER_API_KEY
 open_food_facts_api = OPENFOODFACTS_API_URL
 nutritionix_api = NUTRITIONIX_API_KEY
 nutritionix_id = NUTRITIONIX_APP_ID
-
-
-# Получение температуры в городе через OpenWeatherMap
-async def get_temperature(city: str) -> float:
-    url = f"http://api.openweathermap.org/data/2.5/weather"
-    params = {
-        "q": city,
-        "appid": open_weather_api,
-        "units": "metric"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data["main"]["temp"]
-            else:
-                return None
-
-
-# Расчет нормы воды
-def calculate_water_goal(weight, activity_minutes, temperature):
-    base_water = weight * 30
-    activity_bonus = (activity_minutes // 30) * 500
-    weather_bonus = 500 if temperature > 25 else 0
-    return base_water + activity_bonus + weather_bonus
-
-
-# Расчет нормы калорий
-def calculate_calorie_goal(weight, height, age, activity_minutes):
-    base_calories = 10 * weight + 6.25 * height - 5 * age
-    activity_bonus = min(400, max(200, activity_minutes * 5))
-    return base_calories + activity_bonus
 
 
 # ХЭНДЛЕР /start (Запуск бота)
@@ -71,7 +45,8 @@ async def cmd_help(message: Message):
         "/log_food - Трекинг калорий\n"
         "/log_workout - Трекинг физической активности\n"
         "/check_progress - Проверка текущего прогресса\n"
-        "/update_weight - Обновление веса\n"
+        "/progress_charts - Графики прогресса по воде и калориям\n"
+        "/update_weight - Обновление данных по весу\n"
         "/reset - Удаление профиля (сброс настроек)\n"
     )
 
@@ -83,6 +58,7 @@ async def cmd_set_profile(message: Message, state: FSMContext):
     await message.answer("Введите ваш вес (в кг):")
     await state.set_state(Form.weight)
 
+
 @router.message(StateFilter(Form.weight))
 async def process_weight(message: Message, state: FSMContext):
     # Обработка веса пользователя
@@ -90,6 +66,7 @@ async def process_weight(message: Message, state: FSMContext):
     await state.update_data(weight=weight)
     await message.answer("Введите ваш рост (в см):")
     await state.set_state(Form.height)
+
 
 @router.message(StateFilter(Form.height))
 async def process_height(message: Message, state: FSMContext):
@@ -99,6 +76,7 @@ async def process_height(message: Message, state: FSMContext):
     await message.answer("Введите ваш возраст:")
     await state.set_state(Form.age)
 
+
 @router.message(StateFilter(Form.age))
 async def process_age(message: Message, state: FSMContext):
     # Обработка возраста пользователя
@@ -107,6 +85,7 @@ async def process_age(message: Message, state: FSMContext):
     await message.answer("Сколько минут активности у вас в день?")
     await state.set_state(Form.activity)
 
+
 @router.message(StateFilter(Form.activity))
 async def process_activity(message: Message, state: FSMContext):
     # Обработка уровня активности пользователя
@@ -114,6 +93,7 @@ async def process_activity(message: Message, state: FSMContext):
     await state.update_data(activity=activity)
     await message.answer("В каком городе вы находитесь?")
     await state.set_state(Form.city)
+
 
 @router.message(StateFilter(Form.city))
 async def process_city(message: Message, state: FSMContext):
@@ -159,7 +139,7 @@ async def process_city(message: Message, state: FSMContext):
 
 # ХЭНДЛЕР /log_water (Логирование воды)
 @router.message(Command("log_water"))
-async def log_water(message: Message):
+async def cmd_log_water(message: Message):
     user_id = message.from_user.id
     if user_id not in users:
         await message.answer("Сначала настройте профиль с помощью команды /set_profile.")
@@ -184,49 +164,36 @@ async def log_water(message: Message):
 
 # ХЭНДЛЕР /log_food (Логирование еды)
 @router.message(Command("log_food"))
-async def log_food(message: Message, state: FSMContext):
+async def cmd_log_food(message: Message, state: FSMContext):
     user_id = message.from_user.id
     if user_id not in users:
         await message.answer("Сначала настройте профиль с помощью команды /set_profile.")
         return
 
     # Извлечение названия продукта из команды
-    parts = message.text.split(maxsplit=1)
-    if len(parts) != 2:
+    user_input = " ".join(message.text.split()[1:])
+    if len(user_input) != 2:
         await message.answer("Введите название продукта. Пример: /log_food банан")
         return
 
-    product_name = parts[1]
+    # Перевод названия на английский
+    translated_name = translator.translate(user_input, src="ru", dest="en").text
 
     # Ищем продукт в OpenFoodFacts
-    async with aiohttp.ClientSession() as session:
-        url = f"{open_food_facts_api}{product_name}"
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
+    response = requests.get(f"https://world.openfoodfacts.org/api/v0/product/{translated_name}.json")
+    if response.status_code == 200 and response.json().get("product"):
+        product_data = response.json()["product"]
+        calories_per_100g = product_data.get("nutriments", {}).get("energy-kcal_100g", 0)
+        await state.update_data(calories_per_100g=calories_per_100g)
+        await message.answer(
+            f"{user_input.capitalize()} ({translated_name}) — {calories_per_100g} ккал на 100 г.\n"
+            "Сколько грамм вы съели? Введите число."
+        )
+        await state.set_state(Form.food_weight)
+        return
+    else:
+        await message.answer(f"Продукт {user_input} не найден.")
 
-                if "product" in data and "nutriments" in data["product"]:
-                    product = data["product"]
-                    nutriments = product["nutriments"]
-
-                    if "energy-kcal_100g" in nutriments:
-                        calories_per_100g = nutriments["energy-kcal_100g"]
-                        await state.update_data(
-                            food_name=product.get("product_name", product_name),
-                            calories_per_100g=calories_per_100g,
-                        )
-
-                        await message.answer(
-                            f"🍴 {product.get('product_name', product_name)} — "
-                            f"{calories_per_100g} ккал на 100 г. Сколько грамм вы съели?"
-                        )
-                        await state.set_state(Form.food_weight)
-                    else:
-                        await message.answer(f"Не удалось найти калорийность для продукта {product_name}.")
-                else:
-                    await message.answer(f"Продукт {product_name} не найден.")
-            else:
-                await message.answer("Ошибка при получении данных о продукте.")
 
 # Обработка веса продукта и расчет калорий
 @router.message(StateFilter(Form.food_weight))
@@ -261,7 +228,7 @@ NUTRITIONIX_HEADERS = {
 
 # ХЭНДЛЕР /log_workout (Логирование тренировок)
 @router.message(Command("log_workout"))
-async def log_workout(message: Message):
+async def cmd_log_workout(message: Message):
     user_id = message.from_user.id
     if user_id not in users:
         await message.answer("Сначала настройте профиль с помощью команды /set_profile.")
@@ -321,7 +288,7 @@ async def log_workout(message: Message):
 
 # ХЭНДЛЕР /check_progress (Прогресс по воде и калориям)
 @router.message(Command("check_progress"))
-async def check_progress(message: Message):
+async def cmd_check_progress(message: Message):
     user_id = message.from_user.id
     if user_id not in users:
         await message.answer("Сначала настройте профиль с помощью команды /set_profile.")
@@ -352,6 +319,42 @@ async def check_progress(message: Message):
 
     # Отправка сообщения
     await message.answer(progress_message, parse_mode="HTML")
+
+
+# ХЭНДЛЕР /progress_charts (Графики прогресса по воде и калориям)
+@router.message(Command("progress_charts"))
+async def cmd_progress_charts(message: Message):
+    keyboard = create_chart_selection_keyboard()
+    await message.answer(
+        "Выберите, какой график вы хотите посмотреть:",
+        reply_markup=keyboard
+    )
+
+# Обработка нажатий на кнопки
+@router.callback_query(lambda c: c.data in ["chart_water", "chart_calories"])
+async def handle_chart_selection(callback: CallbackQuery):
+    user_id = callback.from_user.id
+
+    # Проверяем наличие данных пользователя
+    if user_id not in users:
+        await callback.message.answer("Сначала настройте профиль с помощью команды /set_profile.")
+        return
+
+    user_data = users[user_id]
+
+    # Генерация и отправка соответствующего графика
+    if callback.data == "chart_water":
+        water_chart, _ = generate_progress_charts(user_data, user_id)
+        await callback.message.answer_photo(FSInputFile(water_chart), caption="Прогресс по воде")
+        os.remove(water_chart)
+
+    elif callback.data == "chart_calories":
+        _, calorie_chart = generate_progress_charts(user_data, user_id)
+        await callback.message.answer_photo(FSInputFile(calorie_chart), caption="Прогресс по калориям")
+        os.remove(calorie_chart)
+
+        # Уведомление об обработке выбора
+    await callback.answer("График отправлен!")
 
 
 # ХЭНДЛЕР /update_weight (Обновление веса)
