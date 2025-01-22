@@ -4,24 +4,20 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 import aiohttp
 from aiogram.filters.state import StateFilter
-from googletrans import Translator
-import requests
 import os
 from states import Form
-from config import OPENWEATHER_API_KEY, OPENFOODFACTS_API_URL, NUTRITIONIX_API_KEY, NUTRITIONIX_APP_ID
+from config import OPENWEATHER_API_KEY, FOOD_DATA_CENTRAL_API_KEY, NUTRITIONIX_API_KEY, NUTRITIONIX_APP_ID
 from functions import get_temperature, calculate_water_goal, calculate_calorie_goal, create_chart_selection_keyboard
 from functions import generate_progress_charts
 
 router = Router()
-
-translator = Translator()
 
 # Временное хранилище данных
 users = {}
 
 # Получение API-ключей
 open_weather_api = OPENWEATHER_API_KEY
-open_food_facts_api = OPENFOODFACTS_API_URL
+food_data_api = FOOD_DATA_CENTRAL_API_KEY
 nutritionix_api = NUTRITIONIX_API_KEY
 nutritionix_id = NUTRITIONIX_APP_ID
 
@@ -172,35 +168,42 @@ async def cmd_log_food(message: Message, state: FSMContext):
 
     # Извлечение названия продукта из команды
     user_input = " ".join(message.text.split()[1:])
-    if not user_input.strip():
-        await message.answer("Введите название продукта. Пример: /log_food банан")
+    if not user_input:  # Если название продукта не указано
+        await message.answer("Введите название продукта на английском языке. Пример: /log_food banana")
         return
 
-    # Перевод названия на английский
-    translated_name = translator.translate(user_input, src="ru", dest="en").text
+    # Поиск продукта через FoodData Central API
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+                f"https://api.nal.usda.gov/fdc/v1/foods/search",
+                params={"query": user_input, "api_key": FOOD_DATA_CENTRAL_API_KEY}
+        ) as food_data_response:
+            if food_data_response.status != 200:
+                await message.answer("Ошибка при поиске данных о продукте. Попробуйте позже.")
+                return
 
-    # Ищем продукт в OpenFoodFacts
-    response = requests.get(
-        "https://world.openfoodfacts.org/cgi/search.pl",
-        params={"search_terms": translated_name, "search_simple": 1, "action": "process", "json": 1}
+            food_data = await food_data_response.json()
+
+    # Проверяем, есть ли продукты в ответе
+    if not food_data.get("foods"):
+        await message.answer(f"Продукт '{user_input}' не найден. Убедитесь, что вы ввели название на английском языке.")
+        return
+
+    # Получаем данные о калориях
+    food_item = food_data["foods"][0]
+    food_name = food_item.get("description", user_input).capitalize()
+    calories_per_100g = next(
+        (nutrient["value"] for nutrient in food_item.get("foodNutrients", []) if
+         nutrient.get("nutrientName") == "Energy"), 0
     )
-    if response.status_code == 200 and response.json().get("products"):
-        product_data = response.json()["products"][0]
-        calories_per_100g = product_data.get("nutriments", {}).get("energy-kcal_100g", 0)
 
-        # Сохраняем данные в стейт
-        await state.update_data(
-            calories_per_100g=calories_per_100g,
-            food_name=user_input.capitalize()
-        )
+    await state.update_data(calories_per_100g=calories_per_100g, food_name=food_name)
 
-        await message.answer(
-            f"{user_input.capitalize()} ({translated_name}) — {calories_per_100g} ккал на 100 г.\n"
-            "Сколько грамм вы съели? Введите число."
-        )
-        await state.set_state(Form.food_weight)
-    else:
-        await message.answer(f"Продукт {user_input} не найден.")
+    await message.answer(
+        f"{food_name} — {calories_per_100g} ккал на 100 г.\n"
+        "Сколько грамм вы съели? Введите число."
+    )
+    await state.set_state(Form.food_weight)
 
 
 # Обработка веса продукта и расчет калорий
@@ -213,23 +216,22 @@ async def process_food_weight(message: Message, state: FSMContext):
 
     try:
         food_weight = float(message.text)
+        user_data = await state.get_data()
+
+        food_name = user_data.get("food_name", "неизвестный продукт")
+        calories_per_100g = user_data.get("calories_per_100g", 0)
+
+        total_calories = (calories_per_100g * food_weight) / 100
+        users[user_id]["logged_calories"] += total_calories
+
+        await message.answer(
+            f"Записано: {food_name} — {total_calories:.1f} ккал.\n"
+            f"Общее потребление калорий: {users[user_id]['logged_calories']:.1f} ккал."
+        )
+        await state.clear()
     except ValueError:
-        await message.answer("Пожалуйста, введите число (в граммах).")
-        return
-    
-    user_data = await state.get_data()
+        await message.answer("Введите корректное число грамм.")
 
-    calories_per_100g = user_data.get("calories_per_100g", 0)
-    food_name = user_data.get("food_name", "неизвестный продукт")
-
-    total_calories = (calories_per_100g * food_weight) / 100
-    users[user_id]["logged_calories"] += total_calories
-
-    await message.answer(
-        f"Записано: {food_name} — {total_calories:.1f} ккал.\n"
-        f"Общее потребление калорий: {users[user_id]['logged_calories']:.1f} ккал."
-    )
-    await state.clear()
 
 # Отслеживание сожженых калорий на тренировке
 NUTRITIONIX_API_URL = "https://trackapi.nutritionix.com/v2/natural/exercise"
