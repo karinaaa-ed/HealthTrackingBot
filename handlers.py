@@ -172,7 +172,7 @@ async def cmd_log_food(message: Message, state: FSMContext):
 
     # Извлечение названия продукта из команды
     user_input = " ".join(message.text.split()[1:])
-    if len(user_input) != 2:
+    if not user_input.strip():
         await message.answer("Введите название продукта. Пример: /log_food банан")
         return
 
@@ -180,17 +180,25 @@ async def cmd_log_food(message: Message, state: FSMContext):
     translated_name = translator.translate(user_input, src="ru", dest="en").text
 
     # Ищем продукт в OpenFoodFacts
-    response = requests.get(f"https://world.openfoodfacts.org/api/v0/product/{translated_name}.json")
-    if response.status_code == 200 and response.json().get("product"):
-        product_data = response.json()["product"]
+    response = requests.get(
+        "https://world.openfoodfacts.org/cgi/search.pl",
+        params={"search_terms": translated_name, "search_simple": 1, "action": "process", "json": 1}
+    )
+    if response.status_code == 200 and response.json().get("products"):
+        product_data = response.json()["products"][0]
         calories_per_100g = product_data.get("nutriments", {}).get("energy-kcal_100g", 0)
-        await state.update_data(calories_per_100g=calories_per_100g)
+
+        # Сохраняем данные в стейт
+        await state.update_data(
+            calories_per_100g=calories_per_100g,
+            food_name=user_input.capitalize()
+        )
+
         await message.answer(
             f"{user_input.capitalize()} ({translated_name}) — {calories_per_100g} ккал на 100 г.\n"
             "Сколько грамм вы съели? Введите число."
         )
         await state.set_state(Form.food_weight)
-        return
     else:
         await message.answer(f"Продукт {user_input} не найден.")
 
@@ -203,7 +211,12 @@ async def process_food_weight(message: Message, state: FSMContext):
         await message.answer("Сначала настройте профиль с помощью команды /set_profile.")
         return
 
-    food_weight = float(message.text)
+    try:
+        food_weight = float(message.text)
+    except ValueError:
+        await message.answer("Пожалуйста, введите число (в граммах).")
+        return
+    
     user_data = await state.get_data()
 
     calories_per_100g = user_data.get("calories_per_100g", 0)
